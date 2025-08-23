@@ -1,0 +1,66 @@
+{
+  "metrics": {
+    "MSE": 9054.770698533603,
+    "RMSE": 95.15655888341908,
+    "MAE": 75.96215109931538,
+    "R2_Score": 0.4951508840568625,
+    "MAPE": 131.4681593917919,
+    "Mean_Error": -28.51518866851284,
+    "Max_Error": 278.6170959472656,
+    "Explained_Variance": 0.5404861995223815,
+    "Prediction_Std": "91.112755",
+    "True_Std": 133.923850790224
+  },
+  "data_info": {
+    "n_samples": 1927,
+    "true_mean": 213.5199792423456,
+    "true_std": 133.923850790224,
+    "true_min": 1.0,
+    "true_max": 491.0,
+    "pred_mean": "185.0048",
+    "pred_std": "91.112755",
+    "pred_min": "-6.6867347",
+    "pred_max": "381.65936"
+  },
+  "model_info": {
+    "total_parameters": 26337,
+    "architecture": "CNN with 5 conv layers + layer normalization",
+    "input_shape": "30x30x3",
+    "optimizer": "Adam",
+    "loss_function": "Mean Absolute Error",
+    "batch_size": 256,
+    "max_epochs": 100
+  },
+  "training_history": {
+    "final_loss": 0.049087051302194595,
+    "best_loss": 0.03672267124056816,
+    "final_mse": 0.0036684642545878887,
+    "best_mse": 0.36930522322654724,
+    "final_mae": 0.049087051302194595,
+    "best_mae": 0.3201591670513153,
+    "final_val_loss": 0.03766554221510887,
+    "best_val_loss": 0.03436996415257454,
+    "final_val_mse": 0.00208165287040174,
+    "best_val_mse": 0.009290636517107487,
+    "final_val_mae": 0.03766554221510887,
+    "best_val_mae": 0.08534105867147446,
+    "final_lr": "0.001",
+    "best_lr": "0.001"
+  },
+  "error_analysis": {
+    "error_percentiles": {
+      "50th": 66.72512817382812,
+      "75th": 110.65257263183594,
+      "90th": 155.88184814453126,
+      "95th": 197.79396362304678,
+      "99th": 228.87967895507813
+    },
+    "percentage_error_percentiles": {
+      "50th": 30.695534623376858,
+      "75th": 43.23515616285697,
+      "90th": 185.800445256468,
+      "95th": 406.9953276936977,
+      "99th": 1852.0014847264147
+    }
+  }
+}
