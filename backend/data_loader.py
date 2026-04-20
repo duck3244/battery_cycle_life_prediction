@@ -8,6 +8,9 @@ import zipfile
 import numpy as np
 from typing import Optional, List, Dict, Any
 from config import Config
+from utils import setup_logging
+
+logger = setup_logging()
 
 class DataLoader:
     def __init__(self, config: Config = None):
@@ -31,44 +34,38 @@ class DataLoader:
         # Create data directory
         self.config.create_directories()
         
-        # Check if data already exists
         if os.path.exists(data_path) and not force_download:
-            print("Data file already exists. Use force_download=True to re-download.")
+            logger.info("Data file already exists at %s (use force_download=True to re-download).", data_path)
             return True
-            
+
         try:
-            print("Downloading battery data (this may take a while, ~1.2GB)...")
-            
-            # Download the zip file
-            response = requests.get(url, stream=True)
+            logger.info("Downloading battery data (~1.2GB)...")
+            response = requests.get(url, stream=True, timeout=60)
             response.raise_for_status()
-            
+
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
-            
             with open(zip_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        if total_size > 0:
-                            progress = (downloaded / total_size) * 100
-                            print(f"\rDownload progress: {progress:.1f}%", end='', flush=True)
-            
-            print("\nExtracting data...")
-            
-            # Extract the zip file
+                        if total_size > 0 and downloaded % (1024 * 1024 * 32) < 8192:
+                            logger.info("Download progress: %.1f%%", downloaded / total_size * 100)
+
+            logger.info("Extracting data...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(self.config.DATA_DIR)
-            
-            # Clean up zip file
             os.remove(zip_path)
-            
-            print("Data downloaded and extracted successfully!")
+
+            logger.info("Data downloaded and extracted successfully.")
             return True
-            
-        except Exception as e:
-            print(f"Error downloading data: {e}")
+
+        except requests.RequestException as e:
+            logger.error("Network error downloading data: %s", e)
+            return False
+        except (zipfile.BadZipFile, OSError) as e:
+            logger.error("Failed to unpack data archive: %s", e)
             return False
     
     def load_battery_data(self, data_path: str = None) -> Optional[np.ndarray]:
@@ -85,23 +82,16 @@ class DataLoader:
         
         try:
             from scipy.io import loadmat
-            print(f"Loading battery data from {data_path}...")
-            
+            logger.info("Loading battery data from %s...", data_path)
             mat_data = loadmat(data_path)
             battery_data = mat_data['batteryDischargeData']
-            
-            print(f"Loaded data for {len(battery_data[0])} batteries")
+            logger.info("Loaded data for %d batteries", len(battery_data[0]))
             return battery_data
-            
-        except ImportError:
-            print("Error: scipy is required to load .mat files. Install it with: pip install scipy")
-            return None
         except FileNotFoundError:
-            print(f"Error: Data file not found at {data_path}")
-            print("Please run download_data() first or check the file path.")
+            logger.error("Data file not found at %s. Run download_data() first.", data_path)
             return None
-        except Exception as e:
-            print(f"Error loading data: {e}")
+        except KeyError:
+            logger.error("'batteryDischargeData' key missing in %s — unexpected .mat format.", data_path)
             return None
     
     def create_synthetic_data(self, num_batteries: int = 40) -> List[Dict[str, List[np.ndarray]]]:
@@ -114,8 +104,8 @@ class DataLoader:
         Returns:
             List of battery discharge data
         """
-        print(f"Creating synthetic data for {num_batteries} batteries...")
-        
+        logger.info("Creating synthetic data for %d batteries...", num_batteries)
+
         discharge_data = []
         np.random.seed(self.config.RANDOM_SEED)
         
@@ -143,11 +133,11 @@ class DataLoader:
                 battery['QdClipped'].append(capacity)
             
             discharge_data.append(battery)
-            
+
             if (i + 1) % 10 == 0:
-                print(f"Generated {i + 1}/{num_batteries} batteries")
-        
-        print("Synthetic data generation completed!")
+                logger.info("Generated %d/%d batteries", i + 1, num_batteries)
+
+        logger.info("Synthetic data generation completed.")
         return discharge_data
     
     def get_battery_info(self, discharge_data: List[Dict[str, List[np.ndarray]]]) -> Dict[str, Any]:
@@ -187,34 +177,27 @@ class DataLoader:
             bool: True if data is valid, False otherwise
         """
         if not discharge_data:
-            print("Error: No data provided")
+            logger.error("No data provided to validator")
             return False
-        
-        try:
-            for i, battery in enumerate(discharge_data):
-                if not all(key in battery for key in ['Vd', 'Td', 'QdClipped']):
-                    print(f"Error: Battery {i} missing required keys")
+
+        for i, battery in enumerate(discharge_data):
+            if not all(key in battery for key in ('Vd', 'Td', 'QdClipped')):
+                logger.error("Battery %d missing required keys", i)
+                return False
+
+            num_cycles = len(battery['Vd'])
+            if num_cycles == 0:
+                logger.warning("Battery %d has no cycles", i)
+                continue
+
+            if not (len(battery['Td']) == num_cycles and len(battery['QdClipped']) == num_cycles):
+                logger.error("Battery %d has inconsistent cycle counts", i)
+                return False
+
+            for j in range(min(3, num_cycles)):
+                if not all(isinstance(battery[key][j], np.ndarray) for key in battery.keys()):
+                    logger.error("Battery %d, cycle %d contains non-array data", i, j)
                     return False
-                
-                num_cycles = len(battery['Vd'])
-                if num_cycles == 0:
-                    print(f"Warning: Battery {i} has no cycles")
-                    continue
-                
-                # Check that all measurements have same number of cycles
-                if not (len(battery['Td']) == num_cycles and len(battery['QdClipped']) == num_cycles):
-                    print(f"Error: Battery {i} has inconsistent cycle counts")
-                    return False
-                
-                # Check data types
-                for j in range(min(3, num_cycles)):  # Check first few cycles
-                    if not all(isinstance(battery[key][j], np.ndarray) for key in battery.keys()):
-                        print(f"Error: Battery {i}, cycle {j} contains non-array data")
-                        return False
-            
-            print("Data validation completed successfully!")
-            return True
-            
-        except Exception as e:
-            print(f"Error during data validation: {e}")
-            return False
+
+        logger.info("Data validation completed successfully.")
+        return True

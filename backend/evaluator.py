@@ -9,6 +9,9 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from typing import Dict, List, Tuple, Optional, Any
 import pandas as pd
 from config import Config
+from utils import setup_logging, sanitize_for_json
+
+logger = setup_logging()
 
 class ModelEvaluator:
     def __init__(self, config: Config = None):
@@ -25,30 +28,33 @@ class ModelEvaluator:
         Returns:
             Dictionary of evaluation metrics
         """
+        y_true = np.asarray(y_true, dtype=float)
+        y_pred = np.asarray(y_pred, dtype=float)
+
         # Basic regression metrics
         mse = mean_squared_error(y_true, y_pred)
-        rmse = np.sqrt(mse)
-        mae = mean_absolute_error(y_true, y_pred)
-        
+        rmse = float(np.sqrt(mse))
+        mae = float(mean_absolute_error(y_true, y_pred))
+
         # R-squared
-        r2 = r2_score(y_true, y_pred)
-        
+        r2 = float(r2_score(y_true, y_pred))
+
         # Mean Absolute Percentage Error (avoiding division by zero)
         mask = y_true != 0
         if np.any(mask):
-            mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
+            mape = float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
         else:
-            mape = float('inf')
-        
+            mape = float('nan')
+
         # Mean Error (bias)
-        me = np.mean(y_pred - y_true)
-        
+        me = float(np.mean(y_pred - y_true))
+
         # Maximum error
-        max_error = np.max(np.abs(y_true - y_pred))
-        
+        max_error = float(np.max(np.abs(y_true - y_pred)))
+
         # Explained variance score
-        y_true_mean = np.mean(y_true)
-        explained_var = 1 - np.var(y_true - y_pred) / np.var(y_true)
+        true_var = np.var(y_true)
+        explained_var = float(1 - np.var(y_true - y_pred) / true_var) if true_var > 0 else float('nan')
         
         metrics = {
             'MSE': mse,
@@ -342,37 +348,34 @@ class ModelEvaluator:
                     final_metrics[f'best_{key}'] = min(values) if 'loss' in key else max(values)
             report['training_history'] = final_metrics
         
-        # Calculate error percentiles
+        # Calculate error percentiles (guard against zero divisor in MAPE)
         errors = np.abs(y_true - y_pred)
-        percentage_errors = np.abs((y_true - y_pred) / y_true) * 100
-        
+        nonzero = y_true != 0
+        if np.any(nonzero):
+            percentage_errors = np.abs((y_true[nonzero] - y_pred[nonzero]) / y_true[nonzero]) * 100
+        else:
+            percentage_errors = np.array([])
+
         report['error_analysis'] = {
             'error_percentiles': {
-                '50th': np.percentile(errors, 50),
-                '75th': np.percentile(errors, 75),
-                '90th': np.percentile(errors, 90),
-                '95th': np.percentile(errors, 95),
-                '99th': np.percentile(errors, 99)
+                f'{p}th': float(np.percentile(errors, p)) for p in (50, 75, 90, 95, 99)
             },
-            'percentage_error_percentiles': {
-                '50th': np.percentile(percentage_errors, 50),
-                '75th': np.percentile(percentage_errors, 75),
-                '90th': np.percentile(percentage_errors, 90),
-                '95th': np.percentile(percentage_errors, 95),
-                '99th': np.percentile(percentage_errors, 99)
-            }
+            'percentage_error_percentiles': (
+                {f'{p}th': float(np.percentile(percentage_errors, p)) for p in (50, 75, 90, 95, 99)}
+                if percentage_errors.size else {}
+            ),
         }
-        
+
         # Print summary
         self.print_metrics(metrics, "Comprehensive Model Performance")
-        
+
         # Save report if path provided
         if save_path:
             import json
             with open(save_path, 'w') as f:
-                json.dump(report, f, indent=2, default=str)
-            print(f"Evaluation report saved to {save_path}")
-        
+                json.dump(sanitize_for_json(report), f, indent=2)
+            logger.info("Evaluation report saved to %s", save_path)
+
         return report
     
     def compare_models(self, results_dict: Dict[str, Tuple[np.ndarray, np.ndarray]],

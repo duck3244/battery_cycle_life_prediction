@@ -150,3 +150,60 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+.vite/
+
+# Backend runtime artifacts
+backend/data/
+backend/models/
+backend/results/
+backend/logs/
+backend/predictions.csv
+
+# Large binaries: model checkpoints / weights
+*.h5
+*.hdf5
+*.keras
+*.ckpt
+*.ckpt.*
+*.pb
+*.pt
+*.pth
+*.onnx
+*.tflite
+*.safetensors
+
+# Large binaries: datasets / serialized arrays
+*.npz
+*.npy
+*.mat
+*.parquet
+*.feather
+*.arrow
+*.pkl
+*.pickle
+*.joblib
+
+# Archives (raw dataset downloads)
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tbz2
+*.7z
+*.rar
+*.gz
+*.bz2
+*.xz
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Claude Code local state
+.claude/

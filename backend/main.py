@@ -15,12 +15,16 @@ from data_preprocessor import DataPreprocessor
 from model import BatteryLifeModel
 from evaluator import ModelEvaluator
 from visualizer import DataVisualizer
+from utils import set_global_seed, setup_logging
+
+logger = setup_logging(level=Config.LOG_LEVEL)
 
 class BatteryCycleLifePipeline:
     def __init__(self, config_path=None):
         """Initialize the pipeline with configuration"""
         self.config = Config()
         self.config.create_directories()
+        set_global_seed(self.config.RANDOM_SEED)
         
         # Initialize components
         self.data_loader = DataLoader(self.config)
@@ -35,8 +39,7 @@ class BatteryCycleLifePipeline:
         self.processed_data = {}
         self.results = {}
         
-        print("Battery Cycle Life Prediction Pipeline Initialized")
-        print("=" * 60)
+        logger.info("Battery Cycle Life Prediction Pipeline Initialized")
     
     def load_data(self, use_synthetic=True, download_real=False):
         """
@@ -46,181 +49,149 @@ class BatteryCycleLifePipeline:
             use_synthetic: Use synthetic data for testing
             download_real: Download real data from MathWorks
         """
-        print("\n1. LOADING DATA")
-        print("-" * 30)
-        
+        logger.info("=== Step 1: Loading data ===")
+
         if download_real:
-            print("Downloading real battery data...")
+            logger.info("Downloading real battery data...")
             if self.data_loader.download_data():
                 self.raw_data = self.data_loader.load_battery_data()
                 if self.raw_data is not None:
                     self.discharge_data = self.preprocessor.extract_discharge_data(self.raw_data)
                 else:
-                    print("Failed to load real data, switching to synthetic data")
+                    logger.warning("Failed to load real data, switching to synthetic data")
                     use_synthetic = True
             else:
-                print("Failed to download real data, switching to synthetic data")
+                logger.warning("Failed to download real data, switching to synthetic data")
                 use_synthetic = True
-        
+
         if use_synthetic:
-            print("Creating synthetic battery data...")
             self.discharge_data = self.data_loader.create_synthetic_data()
-        
-        # Validate data
-        if self.data_loader.validate_data(self.discharge_data):
-            # Get data info
-            data_info = self.data_loader.get_battery_info(self.discharge_data)
-            self.results['data_info'] = data_info
-            
-            print(f"\nData loaded successfully!")
-            print(f"Number of batteries: {data_info['num_batteries']}")
-            print(f"Total cycles: {data_info['total_cycles']}")
-            print(f"Average cycles per battery: {data_info['avg_cycles_per_battery']:.1f}")
-            
-            return True
-        else:
-            print("Data validation failed!")
+
+        if not self.data_loader.validate_data(self.discharge_data):
+            logger.error("Data validation failed")
             return False
+
+        data_info = self.data_loader.get_battery_info(self.discharge_data)
+        self.results['data_info'] = data_info
+        logger.info(
+            "Data loaded. batteries=%d total_cycles=%d avg_cycles=%.1f",
+            data_info['num_batteries'], data_info['total_cycles'],
+            data_info['avg_cycles_per_battery'],
+        )
+        return True
     
     def preprocess_data(self):
         """Preprocess the loaded data"""
-        print("\n2. PREPROCESSING DATA")
-        print("-" * 30)
-        
+        logger.info("=== Step 2: Preprocessing data ===")
+
         if self.discharge_data is None:
-            print("No data loaded!")
-            return False
+            raise RuntimeError("No data loaded — call load_data() first.")
         
-        try:
-            # Interpolate data
-            print("Performing linear interpolation...")
-            V_interp, T_interp, Qd_interp = self.preprocessor.linear_interpolation(self.discharge_data)
-            
-            # Split data indices
-            num_batteries = len(self.discharge_data)
-            train_indices, val_indices, test_indices = self.preprocessor.split_data_indices(num_batteries)
-            
-            # Reshape data for CNN
-            print("Reshaping data for CNN...")
-            train_data, train_rul = self.preprocessor.reshape_for_cnn(V_interp, T_interp, Qd_interp, train_indices)
-            val_data, val_rul = self.preprocessor.reshape_for_cnn(V_interp, T_interp, Qd_interp, val_indices)
-            test_data, test_rul = self.preprocessor.reshape_for_cnn(V_interp, T_interp, Qd_interp, test_indices)
-            
-            # Store processed data
-            self.processed_data = {
-                'V_interp': V_interp,
-                'T_interp': T_interp,
-                'Qd_interp': Qd_interp,
-                'train_data': train_data,
-                'train_rul': train_rul,
-                'val_data': val_data,
-                'val_rul': val_rul,
-                'test_data': test_data,
-                'test_rul': test_rul,
-                'train_indices': train_indices,
-                'val_indices': val_indices,
-                'test_indices': test_indices
-            }
-            
-            print(f"Data preprocessing completed!")
-            print(f"Training data shape: {train_data.shape}")
-            print(f"Validation data shape: {val_data.shape}")
-            print(f"Test data shape: {test_data.shape}")
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error during preprocessing: {e}")
-            return False
+        # Interpolate data
+        V_interp, T_interp, Qd_interp = self.preprocessor.linear_interpolation(self.discharge_data)
+
+        # Split data indices (raises on overlap)
+        num_batteries = len(self.discharge_data)
+        train_indices, val_indices, test_indices = self.preprocessor.split_data_indices(num_batteries)
+
+        # Reshape data for CNN
+        train_data, train_rul = self.preprocessor.reshape_for_cnn(V_interp, T_interp, Qd_interp, train_indices)
+        val_data, val_rul = self.preprocessor.reshape_for_cnn(V_interp, T_interp, Qd_interp, val_indices)
+        test_data, test_rul = self.preprocessor.reshape_for_cnn(V_interp, T_interp, Qd_interp, test_indices)
+
+        if train_data.size == 0:
+            raise RuntimeError("Training data is empty after preprocessing.")
+
+        # Fit normalization on train only, apply to val/test, persist params
+        train_data, norm_params = self.preprocessor.normalize_data(
+            train_data, method=self.config.NORMALIZATION_METHOD
+        )
+        if val_data.size:
+            val_data = self.preprocessor.apply_normalization(val_data, norm_params)
+        if test_data.size:
+            test_data = self.preprocessor.apply_normalization(test_data, norm_params)
+        self.preprocessor.save_norm_params(norm_params)
+
+        self.processed_data = {
+            'V_interp': V_interp,
+            'T_interp': T_interp,
+            'Qd_interp': Qd_interp,
+            'train_data': train_data,
+            'train_rul': train_rul,
+            'val_data': val_data,
+            'val_rul': val_rul,
+            'test_data': test_data,
+            'test_rul': test_rul,
+            'train_indices': train_indices,
+            'val_indices': val_indices,
+            'test_indices': test_indices,
+            'norm_params': norm_params,
+        }
+
+        logger.info("Preprocessing done. Train %s, Val %s, Test %s",
+                    train_data.shape, val_data.shape, test_data.shape)
+        return True
     
     def train_model(self, epochs=None, batch_size=None):
         """Train the CNN model"""
-        print("\n3. TRAINING MODEL")
-        print("-" * 30)
+        logger.info("=== Step 3: Training model ===")
         
         if not self.processed_data:
-            print("Data not preprocessed!")
-            return False
-        
-        try:
-            # Create model
-            print("Creating CNN model...")
-            self.model.create_model()
-            print(self.model.get_model_summary())
-            
-            # Train model
-            print("Starting model training...")
-            history = self.model.train(
-                self.processed_data['train_data'],
-                self.processed_data['train_rul'],
-                self.processed_data['val_data'],
-                self.processed_data['val_rul'],
-                epochs=epochs,
-                batch_size=batch_size
-            )
-            
-            # Save model
-            self.model.save_model()
-            
-            self.results['training_history'] = history
-            
-            print("Model training completed!")
-            return True
-            
-        except Exception as e:
-            print(f"Error during training: {e}")
-            return False
+            raise RuntimeError("Data not preprocessed — call preprocess_data() first.")
+
+        self.model.create_model()
+        logger.debug(self.model.get_model_summary())
+
+        history = self.model.train(
+            self.processed_data['train_data'],
+            self.processed_data['train_rul'],
+            self.processed_data['val_data'],
+            self.processed_data['val_rul'],
+            epochs=epochs,
+            batch_size=batch_size,
+        )
+
+        self.model.save_model()
+        self.results['training_history'] = history
+        logger.info("Model training completed.")
+        return True
     
     def evaluate_model(self):
         """Evaluate the trained model"""
-        print("\n4. EVALUATING MODEL")
-        print("-" * 30)
+        logger.info("=== Step 4: Evaluating model ===")
         
         if not self.model.is_trained:
-            print("Model not trained!")
+            raise RuntimeError("Model is not trained — run train_model() first.")
+
+        test_data = self.processed_data['test_data']
+        if test_data.size == 0:
+            logger.warning("Test set is empty — skipping evaluation.")
             return False
-        
-        try:
-            # Make predictions
-            print("Making predictions on test data...")
-            test_predictions = self.model.predict(self.processed_data['test_data'])
-            test_actual = self.processed_data['test_rul'] * self.config.MAX_BATTERY_LIFE
-            
-            # Calculate metrics
-            metrics = self.evaluator.calculate_metrics(test_actual, test_predictions)
-            self.results['test_metrics'] = metrics
-            
-            # Print results
-            self.evaluator.print_metrics(metrics, "Test Set Performance")
-            
-            # Store predictions for visualization
-            self.results['test_predictions'] = test_predictions
-            self.results['test_actual'] = test_actual
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error during evaluation: {e}")
-            return False
+
+        test_predictions = self.model.predict(test_data)
+        test_actual = self.processed_data['test_rul'] * self.config.MAX_BATTERY_LIFE
+
+        metrics = self.evaluator.calculate_metrics(test_actual, test_predictions)
+        self.results['test_metrics'] = metrics
+        self.evaluator.print_metrics(metrics, "Test Set Performance")
+
+        self.results['test_predictions'] = test_predictions
+        self.results['test_actual'] = test_actual
+        return True
     
     def create_visualizations(self, save_plots=True):
         """Create comprehensive visualizations"""
-        print("\n5. CREATING VISUALIZATIONS")
-        print("-" * 30)
-        
+        logger.info("=== Step 5: Creating visualizations ===")
+
         try:
             save_dir = self.config.RESULTS_DIR if save_plots else None
-            
-            # 1. Dataset overview
-            print("Creating dataset overview...")
+
             self.visualizer.create_summary_dashboard(
                 self.discharge_data,
                 self.results['data_info'],
                 save_path=os.path.join(save_dir, 'dataset_overview.png') if save_dir else None
             )
             
-            # 2. Sample battery measurements
-            print("Visualizing sample battery measurements...")
             self.visualizer.plot_battery_measurements(
                 self.discharge_data,
                 battery_idx=0,
@@ -228,9 +199,7 @@ class BatteryCycleLifePipeline:
                 save_path=os.path.join(save_dir, 'sample_measurements.png') if save_dir else None
             )
             
-            # 3. Interpolated data visualization
             if 'V_interp' in self.processed_data:
-                print("Visualizing interpolated data...")
                 self.visualizer.plot_interpolated_data(
                     self.processed_data['V_interp'],
                     self.processed_data['T_interp'],
@@ -240,19 +209,13 @@ class BatteryCycleLifePipeline:
                     save_path=os.path.join(save_dir, 'interpolated_data.png') if save_dir else None
                 )
             
-            # 4. Training history
             if 'training_history' in self.results:
-                print("Plotting training history...")
                 self.evaluator.plot_training_history(
                     self.results['training_history'],
                     save_path=os.path.join(save_dir, 'training_history.png') if save_dir else None
                 )
             
-            # 5. Model predictions
             if 'test_predictions' in self.results:
-                print("Creating prediction visualizations...")
-                
-                # Predictions vs actual
                 self.evaluator.plot_predictions_vs_actual(
                     self.results['test_actual'],
                     self.results['test_predictions'],
@@ -273,13 +236,10 @@ class BatteryCycleLifePipeline:
                     save_path=os.path.join(save_dir, 'error_distribution.png') if save_dir else None
                 )
             
-            # 6. Feature maps (if model is available)
             if self.model.model is not None and 'test_data' in self.processed_data:
-                print("Extracting and visualizing feature maps...")
                 try:
-                    sample_data = self.processed_data['test_data'][:1]  # First test sample
+                    sample_data = self.processed_data['test_data'][:1]
                     feature_maps = self.model.get_feature_maps(sample_data)
-                    
                     if feature_maps:
                         self.visualizer.plot_feature_maps(
                             feature_maps,
@@ -287,23 +247,20 @@ class BatteryCycleLifePipeline:
                             save_path=os.path.join(save_dir, 'feature_maps.png') if save_dir else None
                         )
                 except Exception as e:
-                    print(f"Could not create feature maps visualization: {e}")
-            
-            print("Visualizations completed!")
+                    logger.warning("Could not create feature maps visualization: %s", e)
+
             if save_plots:
-                print(f"All plots saved to {save_dir}")
-            
+                logger.info("Plots saved to %s", save_dir)
             return True
             
         except Exception as e:
-            print(f"Error creating visualizations: {e}")
+            logger.warning("Error creating visualizations: %s", e)
             return False
     
     def generate_report(self, save_report=True):
         """Generate comprehensive evaluation report"""
-        print("\n6. GENERATING REPORT")
-        print("-" * 30)
-        
+        logger.info("=== Step 6: Generating report ===")
+
         try:
             if 'test_predictions' in self.results and 'test_actual' in self.results:
                 report_path = os.path.join(self.config.RESULTS_DIR, 'evaluation_report.json') if save_report else None
@@ -326,15 +283,14 @@ class BatteryCycleLifePipeline:
                 )
                 
                 self.results['evaluation_report'] = report
-                
-                print("\nReport generated successfully!")
+                logger.info("Report generated.")
                 return True
             else:
-                print("No test results available for report generation")
+                logger.warning("No test results available for report generation")
                 return False
                 
         except Exception as e:
-            print(f"Error generating report: {e}")
+            logger.error("Error generating report: %s", e)
             return False
     
     def run_complete_pipeline(self, use_synthetic=True, download_real=False, 
@@ -351,79 +307,103 @@ class BatteryCycleLifePipeline:
             epochs: Training epochs
             batch_size: Training batch size
         """
-        print("Starting Battery Cycle Life Prediction Pipeline")
-        print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 60)
-        
-        # Step 1: Load data
+        logger.info("Starting pipeline at %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
         if not self.load_data(use_synthetic=use_synthetic, download_real=download_real):
-            print("Pipeline failed at data loading step")
+            logger.error("Pipeline failed at data loading step")
             return False
-        
-        # Step 2: Preprocess data
+
         if not self.preprocess_data():
-            print("Pipeline failed at data preprocessing step")
+            logger.error("Pipeline failed at data preprocessing step")
             return False
-        
-        # Step 3: Train model
+
         if not self.train_model(epochs=epochs, batch_size=batch_size):
-            print("Pipeline failed at model training step")
+            logger.error("Pipeline failed at model training step")
             return False
-        
-        # Step 4: Evaluate model
+
         if not self.evaluate_model():
-            print("Pipeline failed at model evaluation step")
+            logger.error("Pipeline failed at model evaluation step")
             return False
-        
-        # Step 5: Create visualizations
+
         if create_plots:
             self.create_visualizations(save_plots=save_results)
-        
-        # Step 6: Generate report
+
         if save_results:
             self.generate_report(save_report=save_results)
-        
-        print("\n" + "=" * 60)
-        print("PIPELINE COMPLETED SUCCESSFULLY!")
-        print("=" * 60)
-        
-        # Summary
+
+        logger.info("Pipeline completed successfully.")
         if 'test_metrics' in self.results:
-            print(f"\nFinal Model Performance:")
-            print(f"RMSE: {self.results['test_metrics']['RMSE']:.2f}")
-            print(f"MAE: {self.results['test_metrics']['MAE']:.2f}")
-            print(f"MAPE: {self.results['test_metrics']['MAPE']:.2f}%")
-            print(f"R² Score: {self.results['test_metrics']['R2_Score']:.4f}")
-        
+            m = self.results['test_metrics']
+            logger.info(
+                "Final test metrics — RMSE=%.2f MAE=%.2f MAPE=%.2f%% R2=%.4f",
+                m['RMSE'], m['MAE'], m['MAPE'], m['R2_Score'],
+            )
         if save_results:
-            print(f"\nResults saved to: {self.config.RESULTS_DIR}")
-            print(f"Model saved to: {self.config.MODEL_SAVE_PATH}")
-        
+            logger.info("Results dir: %s | Model: %s",
+                        self.config.RESULTS_DIR, self.config.MODEL_SAVE_PATH)
         return True
     
     def load_and_predict(self, model_path=None, data=None):
+        """Low-level helper: load model and predict on an already-normalized array."""
+        model_path = model_path or self.config.MODEL_SAVE_PATH
+        if not self.model.load_model(model_path):
+            raise RuntimeError(f"Failed to load model from {model_path}")
+        if data is None:
+            raise ValueError("data is required")
+        return self.model.predict(data)
+
+    def predict_from_mat(self, mat_path: str, model_path: str = None,
+                         norm_path: str = None, save_csv: bool = True):
         """
-        Load a trained model and make predictions on new data
-        
+        End-to-end prediction: load a .mat file of raw battery data,
+        run the same preprocessing + normalization used in training, and
+        return (predictions, per-battery output).
+
         Args:
-            model_path: Path to saved model
-            data: New data for prediction
-            
-        Returns:
-            Predictions array
+            mat_path: Path to a .mat file in the same format as the training data.
+            model_path: Optional override for model checkpoint path.
+            norm_path: Optional override for normalization params path.
+            save_csv: If True, write predictions to results/predictions.csv.
         """
         model_path = model_path or self.config.MODEL_SAVE_PATH
-        
-        if self.model.load_model(model_path):
-            if data is not None:
-                predictions = self.model.predict(data)
-                return predictions
-            else:
-                print("No data provided for prediction")
-                return None
-        else:
-            print("Failed to load model")
-            return None
+        norm_path = norm_path or self.config.NORM_PARAMS_PATH
+
+        if not os.path.exists(mat_path):
+            raise FileNotFoundError(f"Input .mat file not found: {mat_path}")
+
+        # 1. Load raw data
+        raw = self.data_loader.load_battery_data(mat_path)
+        if raw is None:
+            raise RuntimeError(f"Could not read battery data from {mat_path}")
+
+        discharge = self.preprocessor.extract_discharge_data(raw)
+        V, T, Qd = self.preprocessor.linear_interpolation(discharge)
+
+        # 2. Reshape every battery (use all indices since this is inference)
+        indices = list(range(len(discharge)))
+        data, _ = self.preprocessor.reshape_for_cnn(V, T, Qd, indices)
+        if data.size == 0:
+            raise RuntimeError("No usable cycles found in input data.")
+
+        # 3. Apply saved normalization params
+        norm_params = self.preprocessor.load_norm_params(norm_path)
+        data = self.preprocessor.apply_normalization(data, norm_params)
+
+        # 4. Load model and predict (rescale to raw cycle count units)
+        if not self.model.load_model(model_path):
+            raise RuntimeError(f"Failed to load model from {model_path}")
+        predictions = self.model.predict(data, rescale=True)
+
+        logger.info("Generated %d predictions from %s", len(predictions), mat_path)
+
+        if save_csv:
+            out_path = os.path.join(self.config.RESULTS_DIR, 'predictions.csv')
+            os.makedirs(self.config.RESULTS_DIR, exist_ok=True)
+            np.savetxt(out_path, predictions, delimiter=',',
+                       header='predicted_rul_cycles', comments='')
+            logger.info("Predictions written to %s", out_path)
+
+        return predictions
 
 
 def main():
@@ -446,7 +426,11 @@ def main():
                        help='Do not save results to files')
     parser.add_argument('--model-path', type=str, default=None,
                        help='Path to saved model (for predict mode)')
-    
+    parser.add_argument('--input-mat', type=str, default=None,
+                       help='Path to a .mat file with new battery data (predict mode)')
+    parser.add_argument('--norm-path', type=str, default=None,
+                       help='Path to normalization params (.npz) for predict mode')
+
     args = parser.parse_args()
     
     # Initialize pipeline
@@ -463,32 +447,38 @@ def main():
             batch_size=args.batch_size
         )
         
-        if success:
-            print("\nPipeline completed successfully!")
-            sys.exit(0)
-        else:
-            print("\nPipeline failed!")
-            sys.exit(1)
-            
+        sys.exit(0 if success else 1)
+
     elif args.mode == 'train':
-        # Training mode
-        if pipeline.load_data(use_synthetic=not args.no_synthetic, download_real=args.use_real_data):
-            if pipeline.preprocess_data():
-                if pipeline.train_model(epochs=args.epochs, batch_size=args.batch_size):
-                    print("Training completed successfully!")
-                    sys.exit(0)
-        
-        print("Training failed!")
+        ok = (
+            pipeline.load_data(use_synthetic=not args.no_synthetic, download_real=args.use_real_data)
+            and pipeline.preprocess_data()
+            and pipeline.train_model(epochs=args.epochs, batch_size=args.batch_size)
+        )
+        if ok:
+            logger.info("Training completed successfully.")
+            sys.exit(0)
+        logger.error("Training failed.")
         sys.exit(1)
         
     elif args.mode == 'predict':
-        # Prediction mode
-        print("Prediction mode - implement your data loading logic here")
-        # This would require implementing data loading for new predictions
-        # predictions = pipeline.load_and_predict(args.model_path, your_data)
-        
+        if not args.input_mat:
+            logger.error("--input-mat is required for predict mode")
+            sys.exit(2)
+        try:
+            predictions = pipeline.predict_from_mat(
+                mat_path=args.input_mat,
+                model_path=args.model_path,
+                norm_path=args.norm_path,
+            )
+            logger.info("First 5 predictions (cycles): %s", predictions[:5].tolist())
+            sys.exit(0)
+        except Exception as e:
+            logger.exception("Predict mode failed: %s", e)
+            sys.exit(1)
+
     else:
-        print(f"Unknown mode: {args.mode}")
+        logger.error("Unknown mode: %s", args.mode)
         sys.exit(1)
 
 

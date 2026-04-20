@@ -7,7 +7,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential, Model
 from tensorflow.keras.layers import (
-    Conv2D, MaxPooling2D, AveragePooling2D, 
+    Conv2D, MaxPooling2D, AveragePooling2D,
     Dense, Flatten, LayerNormalization, ReLU, Input
 )
 from tensorflow.keras.optimizers import Adam
@@ -15,6 +15,10 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCh
 from typing import Dict, List, Tuple, Optional, Any
 import json
 from config import Config
+from utils import set_global_seed, setup_logging, sanitize_for_json
+
+logger = setup_logging()
+
 
 class BatteryLifeModel:
     def __init__(self, config: Config = None):
@@ -22,10 +26,8 @@ class BatteryLifeModel:
         self.model = None
         self.history = None
         self.is_trained = False
-        
-        # Set random seeds
-        tf.random.set_seed(self.config.RANDOM_SEED)
-        np.random.seed(self.config.RANDOM_SEED)
+
+        set_global_seed(self.config.RANDOM_SEED)
     
     def create_model(self, input_shape: Tuple[int, int, int] = None) -> Model:
         """
@@ -40,12 +42,13 @@ class BatteryLifeModel:
         if input_shape is None:
             input_shape = (self.config.RESHAPE_SIZE, self.config.RESHAPE_SIZE, self.config.NUM_CHANNELS)
         
-        print(f"Creating model with input shape: {input_shape}")
+        logger.info("Creating model with input shape: %s", input_shape)
         
-        # Input layer
+        # Input layer — normalization is applied in the preprocessing pipeline
+        # (DataPreprocessor.normalize_data), so no Rescaling layer is needed here.
         inputs = Input(shape=input_shape)
-        x = tf.keras.layers.Rescaling(1./1.0)(inputs)  # Normalize to [0,1]
-        
+        x = inputs
+
         # First convolutional block
         x = Conv2D(self.config.CONV_FILTERS[0], self.config.CONV_KERNEL_SIZE, padding='same')(x)
         x = LayerNormalization()(x)
@@ -88,8 +91,7 @@ class BatteryLifeModel:
         )
         
         self.model = model
-        print(f"Model created successfully!")
-        print(f"Total parameters: {model.count_params():,}")
+        logger.info("Model created. Total parameters: %s", f"{model.count_params():,}")
         
         return model
     
@@ -175,12 +177,9 @@ class BatteryLifeModel:
         epochs = epochs or self.config.EPOCHS
         batch_size = batch_size or self.config.BATCH_SIZE
         
-        print(f"Starting training...")
-        print(f"Training data shape: {train_data.shape}")
-        print(f"Training labels shape: {train_labels.shape}")
+        logger.info("Starting training. Train %s / Labels %s", train_data.shape, train_labels.shape)
         if val_data is not None:
-            print(f"Validation data shape: {val_data.shape}")
-            print(f"Validation labels shape: {val_labels.shape}")
+            logger.info("Validation data %s / labels %s", val_data.shape, val_labels.shape)
         
         # Prepare validation data
         validation_data = None
@@ -201,36 +200,32 @@ class BatteryLifeModel:
         )
         
         self.is_trained = True
-        print("Training completed!")
+        logger.info("Training completed.")
         
         return self.history.history
     
     def predict(self, data: np.ndarray, rescale: bool = True) -> np.ndarray:
         """
-        Make predictions
-        
+        Make predictions.
+
         Args:
-            data: Input data
-            rescale: Whether to rescale predictions back to original range
-            
-        Returns:
-            Predictions array
+            data: Input data, already normalized the same way as the training set.
+            rescale: If True, multiply network output (normalized RUL in [0,1])
+                by MAX_BATTERY_LIFE to return predictions in raw cycle units.
+                Set to False only when comparing against normalized targets.
         """
         if self.model is None:
             raise ValueError("Model not created yet!")
-        
+
         if not self.is_trained:
-            print("Warning: Model has not been trained yet!")
-        
-        print(f"Making predictions for {data.shape[0]} samples...")
-        predictions = self.model.predict(data, verbose=0)
-        
-        # Rescale back to original range
+            logger.warning("Model has not been trained yet!")
+
+        logger.info("Making predictions for %d samples...", data.shape[0])
+        predictions = self.model.predict(data, verbose=0).flatten()
+
         if rescale:
-            predictions = predictions.flatten() * self.config.MAX_BATTERY_LIFE
-        else:
-            predictions = predictions.flatten()
-        
+            predictions = predictions * self.config.MAX_BATTERY_LIFE
+
         return predictions
     
     def evaluate(self, test_data: np.ndarray, test_labels: np.ndarray) -> Dict[str, float]:
@@ -247,7 +242,7 @@ class BatteryLifeModel:
         if self.model is None:
             raise ValueError("Model not created yet!")
         
-        print("Evaluating model...")
+        logger.info("Evaluating model...")
         
         # Get model metrics
         model_metrics = self.model.evaluate(test_data, test_labels, verbose=0)
@@ -264,7 +259,12 @@ class BatteryLifeModel:
         
         # Calculate MAPE (avoiding division by zero)
         mask = test_labels != 0
-        mape = np.mean(np.abs((test_labels[mask] - predictions[mask]) / test_labels[mask])) * 100
+        if np.any(mask):
+            mape = float(np.mean(
+                np.abs((test_labels[mask] - predictions[mask]) / test_labels[mask])
+            ) * 100)
+        else:
+            mape = float('nan')
         
         metrics = {
             'loss': model_metrics[0],
@@ -288,7 +288,7 @@ class BatteryLifeModel:
             bool: True if successful, False otherwise
         """
         if self.model is None:
-            print("Error: No model to save")
+            logger.error("No model to save")
             return False
         
         filepath = filepath or self.config.MODEL_SAVE_PATH
@@ -304,13 +304,13 @@ class BatteryLifeModel:
             if self.history is not None:
                 history_path = filepath.replace('.h5', '_history.json')
                 with open(history_path, 'w') as f:
-                    json.dump(self.history.history, f, indent=2, default=str)
-            
-            print(f"Model saved to {filepath}")
+                    json.dump(sanitize_for_json(self.history.history), f, indent=2)
+
+            logger.info("Model saved to %s", filepath)
             return True
-            
+
         except Exception as e:
-            print(f"Error saving model: {e}")
+            logger.error("Error saving model: %s", e)
             return False
     
     def load_model(self, filepath: str = None) -> bool:
@@ -327,27 +327,26 @@ class BatteryLifeModel:
         
         try:
             if not os.path.exists(filepath):
-                print(f"Error: Model file not found at {filepath}")
+                logger.error("Model file not found at %s", filepath)
                 return False
-            
+
             self.model = tf.keras.models.load_model(filepath)
             self.is_trained = True
-            
+
             # Load training history if available
             history_path = filepath.replace('.h5', '_history.json')
             if os.path.exists(history_path):
                 with open(history_path, 'r') as f:
                     history_dict = json.load(f)
-                    # Convert back to numpy arrays
                     for key, value in history_dict.items():
                         history_dict[key] = np.array(value)
                     self.history = type('History', (), {'history': history_dict})()
-            
-            print(f"Model loaded from {filepath}")
+
+            logger.info("Model loaded from %s", filepath)
             return True
-            
+
         except Exception as e:
-            print(f"Error loading model: {e}")
+            logger.error("Error loading model: %s", e)
             return False
     
     def get_layer_output(self, data: np.ndarray, layer_name: str) -> np.ndarray:
@@ -393,6 +392,6 @@ class BatteryLifeModel:
                 feature_map = self.get_layer_output(data, layer_name)
                 feature_maps[layer_name] = feature_map
             except Exception as e:
-                print(f"Error getting feature map for {layer_name}: {e}")
+                logger.warning("Error getting feature map for %s: %s", layer_name, e)
         
         return feature_maps

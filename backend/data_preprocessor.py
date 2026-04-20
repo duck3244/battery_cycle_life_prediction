@@ -2,11 +2,16 @@
 Data preprocessing and feature engineering for battery cycle life prediction
 """
 
+import os
 import numpy as np
 from scipy import interpolate
 from scipy.ndimage import uniform_filter1d
 from typing import List, Dict, Tuple, Optional
 from config import Config
+from utils import setup_logging
+
+logger = setup_logging()
+
 
 class DataPreprocessor:
     def __init__(self, config: Config = None):
@@ -22,22 +27,22 @@ class DataPreprocessor:
         Returns:
             List of processed discharge data for each battery
         """
-        print("Extracting discharge data...")
+        logger.info("Extracting discharge data...")
         discharge_data = []
-        
-        for i, battery in enumerate(battery_data[0]):
+
+        batteries = self._iter_struct(battery_data)
+
+        for i, battery in enumerate(batteries):
             battery_discharge = {'Vd': [], 'Td': [], 'QdClipped': []}
-            
+
             try:
-                cycles = battery['cycles'][0, 0]
-                
-                for cycle_idx in range(len(cycles)):
-                    cycle = cycles[cycle_idx]
-                    
+                cycles = self._unwrap_field(battery, 'cycles')
+
+                for cycle in self._iter_struct(cycles):
                     # Extract voltage, temperature, and discharge capacity
-                    V = self._extract_array(cycle['V'][0, 0])
-                    T = self._extract_array(cycle['T'][0, 0])
-                    Qd = self._extract_array(cycle['Qd'][0, 0])
+                    V = self._extract_array(self._unwrap_field(cycle, 'V'))
+                    T = self._extract_array(self._unwrap_field(cycle, 'T'))
+                    Qd = self._extract_array(self._unwrap_field(cycle, 'Qd'))
                     
                     # Find indices for discharge portion (3.6V to 2.0V)
                     discharge_data_cycle = self._extract_discharge_portion(V, T, Qd)
@@ -50,24 +55,53 @@ class DataPreprocessor:
                         battery_discharge['QdClipped'].append(Qd_discharge)
                 
                 discharge_data.append(battery_discharge)
-                
+
                 if (i + 1) % 5 == 0:
-                    print(f"Processed {i + 1}/{len(battery_data[0])} batteries")
-                    
+                    logger.info("Processed %d/%d batteries", i + 1, len(batteries))
+
             except Exception as e:
-                print(f"Error processing battery {i}: {e}")
-                # Add empty battery to maintain indexing
+                logger.warning("Error processing battery %d: %s", i, e)
                 discharge_data.append({'Vd': [], 'Td': [], 'QdClipped': []})
-        
-        print("Discharge data extraction completed!")
+
+        logger.info("Discharge data extraction completed.")
         return discharge_data
-    
+
+    def _iter_struct(self, arr) -> List:
+        """
+        Iterate a MATLAB struct array regardless of scipy's 2-D promotion.
+        Accepts shapes (), (N,), (N,1), (1,N), and (1,M) container wrappers.
+        """
+        a = np.asarray(arr)
+        # Unwrap single-element object containers (e.g. loadmat cell wrappers).
+        while a.dtype == object and a.size == 1:
+            inner = a.item()
+            if isinstance(inner, np.ndarray):
+                a = inner
+            else:
+                break
+        if a.ndim == 0:
+            return [a.item()] if a.dtype == object else [a]
+        return list(a.ravel())
+
+    def _unwrap_field(self, record, field: str):
+        """Pull a field from a struct record (void or 0-D struct ndarray)."""
+        if isinstance(record, np.ndarray) and record.dtype.names and field in record.dtype.names:
+            value = record[field]
+        else:
+            value = record[field]
+        # scipy wraps scalar/nested values in a 1x1 object array — peel one layer.
+        if isinstance(value, np.ndarray) and value.dtype == object and value.size == 1:
+            return value.item()
+        return value
+
     def _extract_array(self, data) -> np.ndarray:
         """Extract numpy array from MATLAB data structure"""
+        # Peel object wrappers repeatedly until we hit numeric data.
+        while isinstance(data, np.ndarray) and data.dtype == object and data.size == 1:
+            data = data.item()
         if hasattr(data, 'flatten'):
-            return data.flatten()
-        else:
             return np.asarray(data).flatten()
+        return np.asarray(data).flatten()
     
     def _extract_discharge_portion(self, V: np.ndarray, T: np.ndarray, Qd: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """
@@ -101,7 +135,7 @@ class DataPreprocessor:
             return None
             
         except Exception as e:
-            print(f"Error extracting discharge portion: {e}")
+            logger.warning("Error extracting discharge portion: %s", e)
             return None
     
     def linear_interpolation(self, discharge_data: List[Dict[str, List[np.ndarray]]]) -> Tuple[List[List[np.ndarray]], List[List[np.ndarray]], List[List[np.ndarray]]]:
@@ -114,7 +148,7 @@ class DataPreprocessor:
         Returns:
             Tuple of (V_interp, T_interp, Qd_interp) interpolated data
         """
-        print("Performing linear interpolation...")
+        logger.info("Performing linear interpolation...")
         V_interp, T_interp, Qd_interp = [], [], []
         
         # Create voltage range for interpolation
@@ -144,7 +178,7 @@ class DataPreprocessor:
                         battery_Qd.append(Qd_reshaped)
                         
                 except Exception as e:
-                    print(f"Error interpolating battery {i}, cycle {j}: {e}")
+                    logger.warning("Error interpolating battery %d, cycle %d: %s", i, j, e)
                     continue
             
             V_interp.append(battery_V)
@@ -152,9 +186,9 @@ class DataPreprocessor:
             Qd_interp.append(battery_Qd)
             
             if (i + 1) % 5 == 0:
-                print(f"Interpolated {i + 1}/{len(discharge_data)} batteries")
-        
-        print("Linear interpolation completed!")
+                logger.info("Interpolated %d/%d batteries", i + 1, len(discharge_data))
+
+        logger.info("Linear interpolation completed.")
         return V_interp, T_interp, Qd_interp
     
     def _interpolate_cycle_data(self, volt: np.ndarray, temp: np.ndarray, qd: np.ndarray, volt_range: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
@@ -214,7 +248,7 @@ class DataPreprocessor:
             return V_reshaped, T_reshaped, Qd_reshaped
             
         except Exception as e:
-            print(f"Error in cycle interpolation: {e}")
+            logger.warning("Error in cycle interpolation: %s", e)
             return None
     
     def reshape_for_cnn(self, V_interp: List[List[np.ndarray]], T_interp: List[List[np.ndarray]], 
@@ -231,7 +265,7 @@ class DataPreprocessor:
         Returns:
             Tuple of (signal_data, rul_data)
         """
-        print(f"Reshaping data for CNN (batteries: {len(battery_indices)})...")
+        logger.info("Reshaping data for CNN (batteries: %d)...", len(battery_indices))
         
         all_data = []
         all_rul = []
@@ -257,7 +291,7 @@ class DataPreprocessor:
                     all_rul.append(rul_battery)
                     
                 except Exception as e:
-                    print(f"Error processing battery {i}: {e}")
+                    logger.warning("Error processing battery %d in reshape: %s", i, e)
                     continue
         
         # Concatenate all data
@@ -265,10 +299,10 @@ class DataPreprocessor:
             signal_data = np.concatenate(all_data, axis=0)
             rul_data = np.concatenate(all_rul, axis=0)
             
-            print(f"Final data shape: {signal_data.shape}")
-            print(f"Final RUL shape: {rul_data.shape}")
+            logger.info("Final data shape: %s", signal_data.shape)
+            logger.info("Final RUL shape: %s", rul_data.shape)
         else:
-            print("Warning: No valid data found!")
+            logger.warning("No valid data found during reshape.")
             signal_data = np.empty((0, self.config.RESHAPE_SIZE, self.config.RESHAPE_SIZE, self.config.NUM_CHANNELS))
             rul_data = np.empty((0,))
         
@@ -285,24 +319,37 @@ class DataPreprocessor:
             Tuple of (train_indices, val_indices, test_indices)
         """
         test_indices = list(range(
-            self.config.TEST_BATTERY_START, 
-            num_batteries, 
-            self.config.TEST_BATTERY_STEP
+            self.config.TEST_BATTERY_START,
+            num_batteries,
+            self.config.TEST_BATTERY_STEP,
         ))
-        
+
         val_indices = list(range(
-            self.config.VAL_BATTERY_START, 
-            num_batteries, 
-            self.config.VAL_BATTERY_STEP
+            self.config.VAL_BATTERY_START,
+            num_batteries,
+            self.config.VAL_BATTERY_STEP,
         ))
-        
-        train_indices = [
-            i for i in range(num_batteries) 
-            if i not in test_indices + val_indices
-        ]
-        
-        print(f"Data split - Train: {len(train_indices)}, Val: {len(val_indices)}, Test: {len(test_indices)}")
-        
+
+        test_set = set(test_indices)
+        val_set = set(val_indices)
+        overlap = test_set & val_set
+        if overlap:
+            raise ValueError(
+                f"Val and test battery indices overlap: {sorted(overlap)}. "
+                f"Check TEST_BATTERY_START/STEP vs VAL_BATTERY_START/STEP in Config."
+            )
+
+        excluded = test_set | val_set
+        train_indices = [i for i in range(num_batteries) if i not in excluded]
+
+        if not train_indices:
+            raise ValueError("Train split is empty — all batteries went to val/test.")
+
+        logger.info(
+            "Data split - Train: %d, Val: %d, Test: %d",
+            len(train_indices), len(val_indices), len(test_indices),
+        )
+
         return train_indices, val_indices, test_indices
     
     def normalize_data(self, data: np.ndarray, method: str = 'minmax') -> Tuple[np.ndarray, Dict]:
@@ -336,13 +383,6 @@ class DataPreprocessor:
     def denormalize_data(self, data: np.ndarray, params: Dict) -> np.ndarray:
         """
         Denormalize data using stored parameters
-        
-        Args:
-            data: Normalized data
-            params: Normalization parameters
-            
-        Returns:
-            Denormalized data
         """
         if params['method'] == 'minmax':
             return data * (params['max'] - params['min']) + params['min']
@@ -350,3 +390,35 @@ class DataPreprocessor:
             return data * params['std'] + params['mean']
         else:
             raise ValueError(f"Unknown normalization method: {params['method']}")
+
+    def apply_normalization(self, data: np.ndarray, params: Dict) -> np.ndarray:
+        """Apply pre-fitted normalization params to new data (val/test/inference)."""
+        if params['method'] == 'minmax':
+            return (data - params['min']) / (params['max'] - params['min'] + 1e-8)
+        if params['method'] == 'zscore':
+            return (data - params['mean']) / (params['std'] + 1e-8)
+        raise ValueError(f"Unknown normalization method: {params['method']}")
+
+    def save_norm_params(self, params: Dict, path: Optional[str] = None) -> str:
+        """Persist normalization params so inference can re-apply them."""
+        path = path or self.config.NORM_PARAMS_PATH
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {'method': np.array(params['method'])}
+        for k, v in params.items():
+            if k == 'method':
+                continue
+            payload[k] = np.asarray(v)
+        np.savez(path, **payload)
+        logger.info("Saved normalization params to %s", path)
+        return path
+
+    def load_norm_params(self, path: Optional[str] = None) -> Dict:
+        """Load normalization params previously written by save_norm_params."""
+        path = path or self.config.NORM_PARAMS_PATH
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Normalization params not found at {path}")
+        with np.load(path, allow_pickle=False) as data:
+            params = {key: data[key] for key in data.files}
+        params['method'] = str(params['method'])
+        logger.info("Loaded normalization params from %s", path)
+        return params

@@ -24,24 +24,32 @@ class Config:
     VALIDATION_PATIENCE = 10
     EARLY_STOPPING_PATIENCE = 10
     
-    # Data split indices
+    # Data split indices — val and test must be disjoint.
+    # With start=1/0 and step=8 each, sets are {1,9,17,...} and {0,8,16,...}.
     TEST_BATTERY_STEP = 8
     VAL_BATTERY_STEP = 8
-    TEST_BATTERY_START = 1  # Every 8th battery starting from 1
-    VAL_BATTERY_START = 0   # Every 8th battery starting from 0
-    
+    TEST_BATTERY_START = 1
+    VAL_BATTERY_START = 0
+
+    # Normalization
+    NORMALIZATION_METHOD = 'minmax'  # 'minmax' or 'zscore'
+    NORM_PARAMS_PATH = os.path.join('models', 'norm_params.npz')
+
     # Model architecture
     CONV_FILTERS = [8, 16, 32, 32, 32]
     CONV_KERNEL_SIZE = 3
     POOL_SIZE = 2
-    
+
     # Random seeds
     RANDOM_SEED = 42
-    
+
+    # Logging
+    LOG_LEVEL = 'INFO'
+
     # Paths
     MODEL_SAVE_PATH = os.path.join('models', 'battery_model.h5')
     RESULTS_DIR = 'results'
-    
+
     @staticmethod
     def create_directories():
         """Create necessary directories"""
